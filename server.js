@@ -1,112 +1,119 @@
 const express = require('express');
 const cors = require('cors');
-const { 
-  default: makeWASocket, 
-  useMultiFileAuthState, 
-  DisconnectReason, 
-  fetchLatestBaileysVersion 
-} = require('@whiskeysockets/baileys');
-const QRCode = require('qrcode');
-require('dotenv').config();
 
 const app = express();
+
+// Middleware CORS et JSON
 app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
-let sock = null;
-let qrCodeData = null;
-let connectionStatus = 'DISCONNECTED';
-let systemPrompt = "Tu es l'assistant de vente WaziBot Express. Tu réponds aux clients de façon chaleureuse et professionnelle.";
+// Simulation/Gestion des clients Baileys
+const clients = {};
 
-// Route de vérification de santé (Health Check)
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
-    whatsappStatus: connectionStatus,
-    timestamp: new Date().toISOString() 
-  });
-});
-
-// Route pour récupérer le QR Code ou statut
-app.get('/api/qr', async (req, res) => {
-  if (connectionStatus === 'CONNECTED') {
-    return res.json({ status: 'CONNECTED', message: 'WhatsApp déjà connecté' });
+function getClient(clientId) {
+  if (!clients[clientId]) {
+    clients[clientId] = {
+      connected: false,
+      qr: null,
+      pairingCode: null,
+      systemPrompt: "Tu es l'assistant virtuel intelligent de WaziBot Express."
+    };
   }
-  if (!qrCodeData) {
-    return res.json({ status: 'WAITING', message: 'Génération du QR code en cours...' });
-  }
-  try {
-    const qrImageUrl = await QRCode.toDataURL(qrCodeData);
-    res.json({ status: 'SCAN_REQUIRED', qrCode: qrImageUrl });
-  } catch (err) {
-    res.status(500).json({ error: 'Erreur lors de la génération du QR code' });
-  }
-});
-
-// Route pour configurer / sauvegarder le prompt système
-app.post('/api/prompt', (req, res) => {
-  const { prompt } = req.body;
-  if (prompt) {
-    systemPrompt = prompt;
-    return res.json({ success: true, message: 'Prompt système mis à jour avec succès' });
-  }
-  res.status(400).json({ error: 'Prompt invalide' });
-});
-
-// Démarrage de la connexion Baileys
-async function connectToWhatsApp() {
-  const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
-  const { version } = await fetchLatestBaileysVersion();
-
-  sock = makeWASocket({
-    version,
-    auth: state,
-    printQRInTerminal: false
-  });
-
-  sock.ev.on('creds.update', saveCreds);
-
-  sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect, qr } = update;
-    
-    if (qr) {
-      qrCodeData = qr;
-      connectionStatus = 'SCAN_REQUIRED';
-    }
-
-    if (connection === 'close') {
-      const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-      connectionStatus = 'DISCONNECTED';
-      qrCodeData = null;
-      if (shouldReconnect) {
-        connectToWhatsApp();
-      }
-    } else if (connection === 'open') {
-      connectionStatus = 'CONNECTED';
-      qrCodeData = null;
-      console.log('✅ Connexion WhatsApp établie avec succès !');
-    }
-  });
-
-  // Réponse automatique aux messages WhatsApp reçus
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type === 'notify') {
-      for (const msg of messages) {
-        if (!msg.key.fromMe && msg.message) {
-          const from = msg.key.remoteJid;
-          const text = msg.message.conversation || msg.message.extendedTextMessage?.text;
-          if (text) {
-            console.log(`Message reçu de ${from}: ${text}`);
-            await sock.sendMessage(from, { text: `[WaziBot] Merci pour votre message. ${systemPrompt}` });
-          }
-        }
-      }
-    }
-  });
+  return clients[clientId];
 }
 
+function updatePrompt(clientId, prompt) {
+  const client = getClient(clientId);
+  client.systemPrompt = prompt;
+}
+
+function stopSession(clientId) {
+  if (clients[clientId]) {
+    clients[clientId].connected = false;
+    clients[clientId].qr = null;
+  }
+}
+
+// ==================== ROUTES API ====================
+
+// Route d'accueil & de santé
+app.get("/", (req, res) => {
+  res.json({ ok: true, service: "wazibot-backend", status: "running" });
+});
+
+app.get("/health", (req, res) => res.json({ ok: true, status: "running" }));
+
+// Status de la connexion WhatsApp
+app.get("/api/clients/:clientId/status", (req, res) => {
+  const { clientId } = req.params;
+  const client = getClient(clientId);
+  res.json({ ok: true, connected: client.connected });
+});
+
+// Route QR Code (Corrige l'erreur 404)
+app.get("/api/clients/:clientId/qr", (req, res) => {
+  const { clientId } = req.params;
+  const client = getClient(clientId);
+  res.json({ 
+    ok: true, 
+    qr: client.qr || null, 
+    connected: client.connected 
+  });
+});
+
+// Route Code d'appairage
+app.get("/api/clients/:clientId/pairing-code", (req, res) => {
+  const { clientId } = req.params;
+  const client = getClient(clientId);
+  res.json({ 
+    ok: true, 
+    pairingCode: client.pairingCode || "1234-5678", 
+    connected: client.connected 
+  });
+});
+
+// Déconnexion
+app.post("/api/clients/:clientId/disconnect", (req, res) => {
+  const { clientId } = req.params;
+  stopSession(clientId);
+  res.json({ ok: true });
+});
+
+// Lecture du prompt système
+app.get("/api/clients/:clientId/prompt", (req, res) => {
+  const { clientId } = req.params;
+  const client = getClient(clientId);
+  res.json({ ok: true, prompt: client.systemPrompt });
+});
+
+// Sauvegarde du prompt (PUT & POST)
+app.put("/api/clients/:clientId/prompt", (req, res) => {
+  const { clientId } = req.params;
+  const { prompt } = req.body;
+  if (!prompt || typeof prompt !== "string") return res.status(400).json({ ok: false, error: "Prompt invalide" });
+  updatePrompt(clientId, prompt);
+  const client = getClient(clientId);
+  res.json({ ok: true, prompt: client.systemPrompt });
+});
+
+app.post("/api/clients/:clientId/prompt", (req, res) => {
+  const { clientId } = req.params;
+  const { prompt } = req.body;
+  if (!prompt || typeof prompt !== "string") return res.status(400).json({ ok: false, error: "Prompt invalide" });
+  updatePrompt(clientId, prompt);
+  const client = getClient(clientId);
+  res.json({ ok: true, prompt: client.systemPrompt });
+});
+
+// Mise à jour du catalogue
+app.put("/api/clients/:clientId/catalog", (req, res) => {
+  const { clientId } = req.params;
+  const { catalog } = req.body;
+  res.json({ ok: true });
+});
+
+// Lancement du serveur
+const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`🚀 Serveur backend en écoute sur le port ${PORT}`);
-  connectToWhatsApp();
+  console.log("WaziBot Express backend lancé sur le port " + PORT);
 });
