@@ -105,7 +105,7 @@ app.get("/api/clients/:clientId/pairing-code", (req, res) => {
     });
 });
 
-app.post('/api/clients/:clientId/connect', async (req, res) => {
+app.get('/api/clients/:clientId/connect', async (req, res) => {
     const { clientId } = req.params;
     try {
         await startWhatsAppSession(clientId);
