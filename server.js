@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const pino = require('pino');
+const OpenAI = require('openai');
 const { default: makeWASocket, useMultiFileAuthState } = require('@whiskeysockets/baileys');
 
 const app = express();
@@ -8,6 +9,11 @@ const app = express();
 // Middleware CORS et JSON
 app.use(cors());
 app.use(express.json());
+
+// Initialisation d'OpenAI avec la clé d'environnement Render
+const openai = new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY
+});
 
 // Gestion des clients Baileys
 const clients = {};
@@ -41,7 +47,7 @@ function stopSession(clientId) {
     }
 }
 
-// Fonction pour démarrer Baileys et capturer le QR code
+// Fonction pour démarrer Baileys, capturer le QR code et écouter les messages
 async function startWhatsAppSession(clientId) {
     const client = getClient(clientId);
     const { state, saveCreds } = await useMultiFileAuthState(`./auth_info_${clientId}`);
@@ -60,6 +66,7 @@ async function startWhatsAppSession(clientId) {
         if (connection === 'open') {
             client.connected = true;
             client.qr = null;
+            console.log(`Client ${clientId} connecté à WhatsApp avec succès !`);
         }
         if (connection === 'close') {
             client.connected = false;
@@ -68,6 +75,44 @@ async function startWhatsAppSession(clientId) {
     });
 
     sock.ev.on('creds.update', saveCreds);
+
+    // ================= ECOUTE ET REPONSE AUTOMATIQUE VIA IA =================
+    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+        if (type !== 'notify') return;
+
+        for (const msg of messages) {
+            if (!msg.message || msg.key.fromMe || msg.key.remoteJid === 'status@broadcast') continue;
+
+            const from = msg.key.remoteJid;
+            const text = msg.message.conversation || msg.message.extendedTextMessage?.text;
+
+            if (!text) continue;
+
+            console.log(`Message reçu de ${from}: ${text}`);
+
+            try {
+                const completion = await openai.chat.completions.create({
+                    model: 'gpt-4o-mini',
+                    messages: [
+                        { role: 'system', content: client.systemPrompt },
+                        { role: 'user', content: text }
+                    ],
+                    max_tokens: 300
+                });
+
+                const reply = completion.choices[0].message.content;
+                await sock.sendMessage(from, { text: reply });
+                console.log(`Réponse envoyée à ${from}`);
+
+            } catch (error) {
+                console.error('Erreur lors de l’appel à l’IA :', error.message);
+                await sock.sendMessage(from, {
+                    text: "Désolé, je rencontre un souci technique passager. Un conseiller va vous répondre bientôt."
+                });
+            }
+        }
+    });
+
     client.sock = sock;
 }
 
