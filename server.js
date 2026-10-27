@@ -112,6 +112,17 @@ app.put("/api/clients/:clientId/catalog", (req, res) => {
   res.json({ ok: true });
 });
 
+// Récupération du QR code Baileys
+app.get('/api/clients/:clientId/qr', (req, res) => {
+    const { clientId } = req.params;
+    const client = getClient(clientId);
+    if (client && client.qr) {
+        res.json({ success: true, qr: client.qr });
+    } else {
+        res.status(404).json({ success: false, message: "QR code non disponible ou déjà connecté." });
+    }
+});
+
 // Lancement du serveur
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
