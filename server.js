@@ -1,5 +1,7 @@
 const express = require('express');
 const cors = require('cors');
+const pino = require('pino');
+const { default: makeWASocket, useMultiFileAuthState } = require('@whiskeysockets/baileys');
 
 const app = express();
 
@@ -7,124 +9,141 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Simulation/Gestion des clients Baileys
+// Gestion des clients Baileys
 const clients = {};
 
 function getClient(clientId) {
-  if (!clients[clientId]) {
-    clients[clientId] = {
-      connected: false,
-      qr: null,
-      pairingCode: null,
-      systemPrompt: "Tu es l'assistant virtuel intelligent de WaziBot Express."
-    };
-  }
-  return clients[clientId];
+    if (!clients[clientId]) {
+        clients[clientId] = {
+            id: clientId,
+            connected: false,
+            qr: null,
+            pairingCode: null,
+            systemPrompt: "Tu es l'assistant virtuel intelligent de WaziBot Express."
+        };
+    }
+    return clients[clientId];
 }
 
 function updatePrompt(clientId, prompt) {
-  const client = getClient(clientId);
-  client.systemPrompt = prompt;
+    const client = getClient(clientId);
+    client.systemPrompt = prompt;
 }
 
 function stopSession(clientId) {
-  if (clients[clientId]) {
-    clients[clientId].connected = false;
-    clients[clientId].qr = null;
-  }
+    if (clients[clientId]) {
+        clients[clientId].connected = false;
+        clients[clientId].qr = null;
+        if (clients[clientId].sock) {
+            clients[clientId].sock.end();
+            clients[clientId].sock = null;
+        }
+    }
 }
 
-// ==================== ROUTES API ====================
+// Fonction pour démarrer Baileys et capturer le QR code
+async function startWhatsAppSession(clientId) {
+    const client = getClient(clientId);
+    const { state, saveCreds } = await useMultiFileAuthState(`./auth_info_${clientId}`);
+    
+    const sock = makeWASocket({
+        auth: state,
+        printQRInTerminal: true,
+        logger: pino({ level: 'silent' })
+    });
 
-// Route d'accueil & de santé
+    sock.ev.on('connection.update', (update) => {
+        const { connection, qr } = update;
+        if (qr) {
+            client.qr = qr;
+        }
+        if (connection === 'open') {
+            client.connected = true;
+            client.qr = null;
+        }
+        if (connection === 'close') {
+            client.connected = false;
+            client.qr = null;
+        }
+    });
+
+    sock.ev.on('creds.update', saveCreds);
+    client.sock = sock;
+}
+
+// ================= ROUTES API =================
+
 app.get("/", (req, res) => {
-  res.json({ ok: true, service: "wazibot-backend", status: "running" });
+    res.json({ ok: true, service: "wazibot-backend", status: "running" });
 });
 
 app.get("/health", (req, res) => res.json({ ok: true, status: "running" }));
 
-// Status de la connexion WhatsApp
 app.get("/api/clients/:clientId/status", (req, res) => {
-  const { clientId } = req.params;
-  const client = getClient(clientId);
-  res.json({ ok: true, connected: client.connected });
+    const { clientId } = req.params;
+    const client = getClient(clientId);
+    res.json({ ok: true, connected: client.connected });
 });
 
-// Route QR Code (Corrige l'erreur 404)
-app.get("/api/clients/:clientId/qr", (req, res) => {
-  const { clientId } = req.params;
-  const client = getClient(clientId);
-  res.json({ 
-    ok: true, 
-    qr: client.qr || null, 
-    connected: client.connected 
-  });
-});
-
-// Route Code d'appairage
-app.get("/api/clients/:clientId/pairing-code", (req, res) => {
-  const { clientId } = req.params;
-  const client = getClient(clientId);
-  res.json({ 
-    ok: true, 
-    pairingCode: client.pairingCode || "1234-5678", 
-    connected: client.connected 
-  });
-});
-
-// Déconnexion
-app.post("/api/clients/:clientId/disconnect", (req, res) => {
-  const { clientId } = req.params;
-  stopSession(clientId);
-  res.json({ ok: true });
-});
-
-// Lecture du prompt système
-app.get("/api/clients/:clientId/prompt", (req, res) => {
-  const { clientId } = req.params;
-  const client = getClient(clientId);
-  res.json({ ok: true, prompt: client.systemPrompt });
-});
-
-// Sauvegarde du prompt (PUT & POST)
-app.put("/api/clients/:clientId/prompt", (req, res) => {
-  const { clientId } = req.params;
-  const { prompt } = req.body;
-  if (!prompt || typeof prompt !== "string") return res.status(400).json({ ok: false, error: "Prompt invalide" });
-  updatePrompt(clientId, prompt);
-  const client = getClient(clientId);
-  res.json({ ok: true, prompt: client.systemPrompt });
-});
-
-app.post("/api/clients/:clientId/prompt", (req, res) => {
-  const { clientId } = req.params;
-  const { prompt } = req.body;
-  if (!prompt || typeof prompt !== "string") return res.status(400).json({ ok: false, error: "Prompt invalide" });
-  updatePrompt(clientId, prompt);
-  const client = getClient(clientId);
-  res.json({ ok: true, prompt: client.systemPrompt });
-});
-
-// Mise à jour du catalogue
-app.put("/api/clients/:clientId/catalog", (req, res) => {
-  const { clientId } = req.params;
-  const { catalog } = req.body;
-  res.json({ ok: true });
-});
-
-// Récupération du QR code Baileys
 app.get('/api/clients/:clientId/qr', (req, res) => {
     const { clientId } = req.params;
     const client = getClient(clientId);
     if (client && client.qr) {
         res.json({ success: true, qr: client.qr });
     } else {
-        res.status(404).json({ success: false, message: "QR code non disponible ou déjà connecté." });
+        res.status(404).json({ success: false, message: "QR code non disponible ou déjà connecté" });
     }
+});
+
+app.get("/api/clients/:clientId/pairing-code", (req, res) => {
+    const { clientId } = req.params;
+    const client = getClient(clientId);
+    res.json({
+        ok: true,
+        pairingCode: client.pairingCode || "1234-5678",
+        connected: client.connected
+    });
+});
+
+app.post('/api/clients/:clientId/connect', async (req, res) => {
+    const { clientId } = req.params;
+    try {
+        await startWhatsAppSession(clientId);
+        res.json({ success: true, message: "Génération du QR code démarrée." });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.post("/api/clients/:clientId/disconnect", (req, res) => {
+    const { clientId } = req.params;
+    stopSession(clientId);
+    res.json({ ok: true });
+});
+
+app.get("/api/clients/:clientId/prompt", (req, res) => {
+    const { clientId } = req.params;
+    const client = getClient(clientId);
+    res.json({ ok: true, prompt: client.systemPrompt });
+});
+
+app.post("/api/clients/:clientId/prompt", (req, res) => {
+    const { clientId } = req.params;
+    const { prompt } = req.body;
+    if (!prompt || typeof prompt !== "string") {
+        return res.status(400).json({ ok: false, error: "Prompt invalide" });
+    }
+    updatePrompt(clientId, prompt);
+    const client = getClient(clientId);
+    res.json({ ok: true, prompt: client.systemPrompt });
+});
+
+app.put("/api/clients/:clientId/catalog", (req, res) => {
+    res.json({ ok: true });
 });
 
 // Lancement du serveur
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log("WaziBot Express backend lancé sur le port " + PORT);
+    console.log("WaziBot Express backend lancé sur le port " + PORT);
 });
