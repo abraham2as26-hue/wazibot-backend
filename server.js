@@ -1,127 +1,91 @@
 const express = require('express');
-const cors = require('cors');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const pino = require('pino');
-const fs = require('fs');
-const { default: makeWASocket, useMultiFileAuthState } = require('@whiskeysockets/baileys');
+const cors = require('cors');
 
 const app = express();
-
-// Middleware CORS et JSON
-app.use(cors());
 app.use(express.json());
+app.use(cors());
 
-// Gestion des clients Baileys
-const clients = {};
+const PORT = process.env.PORT || 10000;
+
+// Gestionnaire des sessions actives
+const sessions = {};
 
 function getClient(clientId) {
-    if (!clients[clientId]) {
-        clients[clientId] = {
-            id: clientId,
-            connected: false,
+    if (!sessions[clientId]) {
+        sessions[clientId] = {
+            sock: null,
             qr: null,
-            pairingCode: null,
-            pairingRequested: false,
-            systemPrompt: "Tu es l'assistant virtuel intelligent de WaziBot Express."
+            connected: false
         };
     }
-    return clients[clientId];
+    return sessions[clientId];
 }
 
-function updatePrompt(clientId, prompt) {
-    const client = getClient(clientId);
-    client.systemPrompt = prompt;
-}
-
-function stopSession(clientId) {
-    if (clients[clientId]) {
-        clients[clientId].connected = false;
-        clients[clientId].qr = null;
-        clients[clientId].pairingRequested = false;
-        clients[clientId].pairingCode = null;
-        if (clients[clientId].sock) {
-            clients[clientId].sock.end();
-            clients[clientId].sock = null;
+function stopsession(clientId) {
+    if (sessions[clientId] && sessions[clientId].sock) {
+        try {
+            sessions[clientId].sock.end(undefined);
+        } catch (e) {
+            console.error(e);
         }
-    }
-    // Nettoyage complet des anciens fichiers de session
-    const sessionPath = `./auth_info_${clientId}`;
-    if (fs.existsSync(sessionPath)) {
-        fs.rmSync(sessionPath, { recursive: true, force: true });
-        console.log(`Dossier de session ${sessionPath} nettoyé.`);
+        sessions[clientId].sock = null;
     }
 }
 
-// Fonction pour démarrer Baileys et gérer la connexion
 async function startWhatsAppSession(clientId) {
-    stopSession(clientId); // Nettoie avant de recréer une session neuve
+    stopsession(clientId);
     const client = getClient(clientId);
     const { state, saveCreds } = await useMultiFileAuthState(`./auth_info_${clientId}`);
-    
+
     const sock = makeWASocket({
         auth: state,
-        printQRInTerminal: true,
-        logger: pino({ level: 'silent' })
+        printQRTerminal: true,
+        logger: pino({ level: 'silent' }),
+        browser: ["WaziBot Express", "Chrome", "10.15.0"],
+        connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: 60000,
+        keepAliveIntervalMs: 25000,
+        retryRequestDelayMs: 2500
     });
 
-    const phoneNumber = process.env.PHONE_NUMBER;
-    if (phoneNumber && !sock.authState.creds.registered && !client.pairingRequested) {
-        client.pairingRequested = true;
-        try {
-            const cleanedNumber = phoneNumber.replace(/[^0-9]/g, '');
-            setTimeout(async () => {
-                const code = await sock.requestPairingCode(cleanedNumber);
-                client.pairingCode = code;
-                console.log("========================================");
-                console.log(`NOUVEAU CODE D'APPAIRAGE UNIQUE : ${code}`);
-                console.log("========================================");
-            }, 5000);
-        } catch (err) {
-            console.error("Erreur pairing code:", err);
-            client.pairingRequested = false;
-        }
-    }
-
-    sock.ev.on('connection.update', (update) => {
-        const { connection, qr } = update;
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
         if (qr) {
             client.qr = qr;
         }
         if (connection === 'open') {
             client.connected = true;
             client.qr = null;
-            console.log(`Client ${clientId} connecté à WhatsApp avec succès !`);
+            console.log(`Client ${clientId} connecté avec succès !`);
         }
         if (connection === 'close') {
             client.connected = false;
             client.qr = null;
-            client.pairingRequested = false;
+            const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+            console.log(`Connexion fermée pour ${clientId}, reconnexion :`, shouldReconnect);
+            if (shouldReconnect) {
+                startWhatsAppSession(clientId);
+            }
         }
     });
 
     sock.ev.on('creds.update', saveCreds);
 
-    // ================= TEST TEMPORAIRE SANS IA =================
+    // Test temporaire de réception / réponse automatique
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;
-
         for (const msg of messages) {
-            if (!msg.message || msg.key.fromMe || msg.key.remoteJid === 'status@broadcast') continue;
-
+            if (!msg.message || msg.key.fromMe) continue;
             const from = msg.key.remoteJid;
             const text = msg.message.conversation || msg.message.extendedTextMessage?.text;
-
             if (!text) continue;
-
-            console.log(`Message reçu de ${from}: ${text}`);
-
             try {
-                // Réponse fixe pour tester la liaison Baileys/WhatsApp sans consommer d'OpenAI
                 const reply = `✅ Test réussi ! Ton message a bien été reçu : "${text}"`;
                 await sock.sendMessage(from, { text: reply });
-                console.log(`Réponse de test envoyée à ${from}`);
-
             } catch (error) {
-                console.error('Erreur lors de l’envoi du message de test :', error.message);
+                console.error('Erreur lors de l\'envoi du message test :', error);
             }
         }
     });
@@ -129,182 +93,89 @@ async function startWhatsAppSession(clientId) {
     client.sock = sock;
 }
 
-// ================= ROUTES API & FRONT-END INTÉGRÉ =================
-
-// Page d'accueil : Interface web SaaS pour les clients
-app.get("/", (req, res) => {
-    res.send(`<!DOCTYPE html>
-<html lang="fr">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WaziBot Express - Connexion WhatsApp</title>
-    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-</head>
-<body class="bg-slate-50 min-h-screen flex items-center justify-center p-4">
-    <div class="bg-white rounded-2xl shadow-xl p-8 max-w-md w-full text-center">
-        <h1 class="text-2xl font-bold text-slate-800 mb-2">WaziBot Express</h1>
-        <p class="text-slate-500 text-sm mb-6">Connectez votre WhatsApp pour démarrer votre période d'essai de 7 jours.</p>
-        
-        <div class="mb-4 text-left">
-            <label class="block text-xs font-semibold text-slate-600 uppercase mb-1">Identifiant de votre structure</label>
-            <input type="text" id="clientId" value="sion" class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none text-slate-800 font-medium">
-        </div>
-
-        <button id="connectBtn" onclick="startConnection()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 rounded-lg transition duration-200 shadow-md cursor-pointer">
-            Générer mon QR Code
-        </button>
-
-        <div id="qrContainer" class="mt-6 hidden flex flex-col items-center">
-            <div id="qrcode" class="p-4 bg-white border border-slate-200 rounded-xl shadow-inner inline-block"></div>
-            <p class="text-xs text-slate-500 mt-3 animate-pulse">Scannez ce QR code avec WhatsApp (Appareils liés)</p>
-        </div>
-
-        <div id="statusMessage" class="mt-6 text-sm font-medium text-slate-600">
-            En attente de démarrage...
-        </div>
-    </div>
-
-    <script>
-        let checkInterval = null;
-
-        async function startConnection() {
-            const clientId = document.getElementById('clientId').value.trim();
-            const statusDiv = document.getElementById('statusMessage');
-            const qrContainer = document.getElementById('qrContainer');
-            
-            if (!clientId) {
-                alert("Veuillez entrer un identifiant valide.");
-                return;
-            }
-
-            statusDiv.textContent = "Initialisation de la session...";
-            qrContainer.classList.add('hidden');
-
-            try {
-                const res = await fetch(\`/api/clients/\${clientId}/connect\`);
-                const data = await res.json();
-
-                if (data.success) {
-                    statusDiv.textContent = "Recherche du QR code en cours...";
-                    if (checkInterval) clearInterval(checkInterval);
-                    checkInterval = setInterval(() => pollClientStatus(clientId), 3000);
-                } else {
-                    statusDiv.textContent = "Erreur au démarrage.";
-                }
-            } catch (err) {
-                console.error(err);
-                statusDiv.textContent = "Impossible de joindre le serveur.";
-            }
-        }
-
-        async function pollClientStatus(clientId) {
-            const statusDiv = document.getElementById('statusMessage');
-            const qrContainer = document.getElementById('qrContainer');
-
-            try {
-                const statusRes = await fetch(\`/api/clients/\${clientId}/status\`);
-                const statusData = await statusRes.json();
-
-                if (statusData.connected) {
-                    clearInterval(checkInterval);
-                    qrContainer.classList.add('hidden');
-                    statusDiv.innerHTML = "<span class='text-green-600 font-bold'>✓ WhatsApp connecté avec succès ! Bot actif.</span>";
-                    return;
-                }
-
-                const qrRes = await fetch(\`/api/clients/\${clientId}/qr\`);
-                const qrData = await qrRes.json();
-
-                if (qrData.success && qrData.qr) {
-                    qrContainer.classList.remove('hidden');
-                    statusDiv.textContent = "Scannez le QR code ci-dessous :";
+// Interface Web simple pour afficher et générer le QR Code
+app.get('/', (req, res) => {
+    res.send(`
+        <!DOCTYPE html>
+        <html lang="fr">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>WaziBot Express</title>
+            <style>
+                body { font-family: Arial, sans-serif; background: #f4f7f6; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+                .card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); text-align: center; width: 350px; }
+                input { width: 100%; padding: 10px; margin: 15px 0; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; }
+                button { background: #6366f1; color: white; border: none; padding: 12px; width: 100%; border-radius: 6px; cursor: pointer; font-size: 16px; }
+                button:hover { background: #4f46e5; }
+                #qrcode { margin-top: 20px; display: flex; justify-content: center; }
+            </style>
+        </head>
+        <body>
+            <div class="card">
+                <h2>WaziBot Express</h2>
+                <p>Connectez votre WhatsApp pour démarrer.</p>
+                <input type="text" id="clientId" value="sion" placeholder="Identifiant de structure">
+                <button onclick="generateQR()">Générer mon QR Code</button>
+                <div id="status">En attente de démarrage...</div>
+                <div id="qrcode"></div>
+            </div>
+            <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+            <script>
+                async function generateQR() {
+                    const clientId = document.getElementById('clientId').value;
+                    document.getElementById('status').innerText = 'Génération en cours...';
                     
-                    const qrElement = document.getElementById('qrcode');
-                    qrElement.innerHTML = "";
-                    new QRCode(qrElement, {
-                        text: qrData.qr,
-                        width: 220,
-                        height: 220
-                    });
+                    await fetch('/start?clientId=' + clientId);
+                    
+                    const interval = setInterval(async () => {
+                        const res = await fetch('/status?clientId=' + clientId);
+                        const data = await res.json();
+                        if (data.connected) {
+                            document.getElementById('status').innerText = '✅ Connecté avec succès !';
+                            document.getElementById('qrcode').innerHTML = '';
+                            clearInterval(interval);
+                        } else if (data.qr) {
+                            document.getElementById('status').innerText = 'Scannez ce QR Code :';
+                            document.getElementById('qrcode').innerHTML = '<canvas id="canvas"></canvas>';
+                            QRCode.toCanvas(document.getElementById('canvas'), data.qr, function (error) {
+                                if (error) console.error(error);
+                            });
+                        }
+                    }, 3000);
                 }
-            } catch (err) {
-                console.error("Erreur lors du polling :", err);
-            }
-        }
-    </script>
-</body>
-</html>`);
+            </script>
+        </body>
+        </html>
+    `);
 });
 
-app.get("/health", (req, res) => res.json({ ok: true, status: "running" }));
-
-app.get("/api/clients/:clientId/status", (req, res) => {
-    const { clientId } = req.params;
-    const client = getClient(clientId);
-    res.json({ ok: true, connected: client.connected });
-});
-
-app.get('/api/clients/:clientId/qr', (req, res) => {
-    const { clientId } = req.params;
-    const client = getClient(clientId);
-    if (client && client.qr) {
-        res.json({ success: true, qr: client.qr });
-    } else {
-        res.status(404).json({ success: false, message: "QR code non disponible ou déjà connecté" });
-    }
-});
-
-app.get("/api/clients/:clientId/pairing-code", (req, res) => {
-    const { clientId } = req.params;
-    const client = getClient(clientId);
-    res.json({
-        ok: true,
-        pairingCode: client.pairingCode || "En attente...",
-        connected: client.connected
+app.get('/start', async (req, res) => {
+    const q = req.query.clientId;
+    const clientId = q || 'sion';
+    startWhatsAppSession(clientId);
+    res.json({ 
+        success: true, 
+        message: 'Session démarrée' 
     });
 });
 
-app.get('/api/clients/:clientId/connect', async (req, res) => {
-    const { clientId } = req.params;
-    try {
-        await startWhatsAppSession(clientId);
-        res.json({ success: true, message: "Session réinitialisée et génération du code démarrée." });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
+app.get('/status', (req, res) => {
+    const q = req.query.clientId;
+    const clientId = q || 'sion';
+    const client = sessions[clientId];
+    if (!client) {
+        return res.json({ 
+            connected: false, 
+            qr: null 
+        });
     }
+    res.json({ 
+        connected: client.connected, 
+        qr: client.qr 
+    });
 });
 
-app.post("/api/clients/:clientId/disconnect", (req, res) => {
-    const { clientId } = req.params;
-    stopSession(clientId);
-    res.json({ ok: true });
-});
-
-app.get("/api/clients/:clientId/prompt", (req, res) => {
-    const { clientId } = req.params;
-    const client = getClient(clientId);
-    res.json({ ok: true, prompt: client.systemPrompt });
-});
-
-app.post("/api/clients/:clientId/prompt", (req, res) => {
-    const { clientId } = req.params;
-    const { prompt } = req.body;
-    if (!prompt || typeof prompt !== "string") {
-        return res.status(400).json({ ok: false, error: "Prompt invalide" });
-    }
-    updatePrompt(clientId, prompt);
-    const client = getClient(clientId);
-    res.json({ ok: true, prompt: client.systemPrompt });
-});
-
-app.put("/api/clients/:clientId/catalog", (req, res) => {
-    res.json({ ok: true });
-});
-
-// Lancement du serveur
-const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-    console.log("WaziBot Express backend lancé sur le port " + PORT);
+    console.log(`WaziBot Express backend lancé sur le port ${PORT}`);
 });
