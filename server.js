@@ -2,7 +2,6 @@ const express = require('express');
 const cors = require('cors');
 const pino = require('pino');
 const fs = require('fs');
-const OpenAI = require('openai');
 const { default: makeWASocket, useMultiFileAuthState } = require('@whiskeysockets/baileys');
 
 const app = express();
@@ -10,11 +9,6 @@ const app = express();
 // Middleware CORS et JSON
 app.use(cors());
 app.use(express.json());
-
-// Initialisation d'OpenAI avec la clé d'environnement Render
-const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY
-});
 
 // Gestion des clients Baileys
 const clients = {};
@@ -106,7 +100,7 @@ async function startWhatsAppSession(clientId) {
 
     sock.ev.on('creds.update', saveCreds);
 
-    // ================= ECOUTE ET REPONSE AUTOMATIQUE VIA IA =================
+    // ================= TEST TEMPORAIRE SANS IA =================
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;
 
@@ -121,24 +115,13 @@ async function startWhatsAppSession(clientId) {
             console.log(`Message reçu de ${from}: ${text}`);
 
             try {
-                const completion = await openai.chat.completions.create({
-                    model: 'gpt-4o-mini',
-                    messages: [
-                        { role: 'system', content: client.systemPrompt },
-                        { role: 'user', content: text }
-                    ],
-                    max_tokens: 300
-                });
-
-                const reply = completion.choices[0].message.content;
+                // Réponse fixe pour tester la liaison Baileys/WhatsApp sans consommer d'OpenAI
+                const reply = `✅ Test réussi ! Ton message a bien été reçu : "${text}"`;
                 await sock.sendMessage(from, { text: reply });
-                console.log(`Réponse envoyée à ${from}`);
+                console.log(`Réponse de test envoyée à ${from}`);
 
             } catch (error) {
-                console.error('Erreur lors de l’appel à l’IA :', error.message);
-                await sock.sendMessage(from, {
-                    text: "Désolé, je rencontre un souci technique passager. Un conseiller va vous répondre bientôt."
-                });
+                console.error('Erreur lors de l’envoi du message de test :', error.message);
             }
         }
     });
