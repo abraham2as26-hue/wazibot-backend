@@ -1,7 +1,7 @@
 const express = require('express');
 const { default: makeWASocket, useMultiFileAuthState } = require('@whiskeysockets/baileys');
 const pino = require('pino');
-const qrcode = require('qrcode-terminal'); // Utilisation explicite pour forcer l'affichage
+const QRCode = require('qrcode'); // Utilise le module qrcode déjà installé
 const fs = require('fs');
 
 const app = express();
@@ -27,13 +27,13 @@ async function startWhatsAppSession() {
         browser: ["WaziBot Express", "Chrome", "10.15.0"]
     });
 
-    // Affichage propre et direct du QR Code via qrcode-terminal
-    sock.ev.on('connection.update', (update) => {
+    sock.ev.on('connection.update', async (update) => {
         const { connection, qr } = update;
         
         if (qr) {
             console.log('--- SCANNEZ CE QR CODE ---');
-            qrcode.generate(qr, { small: true });
+            // Affiche le QR code en texte brut directement dans les logs Render
+            console.log(await QRCode.toString(qr, { type: 'terminal', small: true }));
         }
 
         if (connection === 'open') {
