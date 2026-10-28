@@ -2,6 +2,7 @@ const express = require('express');
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const cors = require('cors');
+const fs = require('fs');
 
 const app = express();
 app.use(express.json());
@@ -31,6 +32,16 @@ function stopsession(clientId) {
             console.error(e);
         }
         sessions[clientId].sock = null;
+    }
+    // Supprimer l'ancienne session pour forcer un nouveau QR propre
+    const sessionPath = `./auth_info_${clientId}`;
+    if (fs.existsSync(sessionPath)) {
+        try {
+            fs.rmSync(sessionPath, { recursive: true, force: true });
+            console.log(`Ancienne session ${clientId} nettoyée.`);
+        } catch (err) {
+            console.error("Erreur lors du nettoyage de la session :", err);
+        }
     }
 }
 
