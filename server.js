@@ -57,7 +57,21 @@ async function startWhatsAppSession(clientId) {
         printQRInTerminal: true,
         logger: pino({ level: 'silent' })
     });
-
+    const phoneNumber = process.env.PHONE_NUMBER;
+    if (phoneNumber && !sock.authState.creds.registered && !client.pairingCode) {
+        try {
+            const cleanedNumber = phoneNumber.replace(/[^0-9]/g, '');
+            setTimeout(async () => {
+                const code = await sock.requestPairingCode(cleanedNumber);
+                client.pairingCode = code;
+                console.log(`========================================`);
+                console.log(`CODE D'APPAIRAGE POUR ${clientId} : ${code}`);
+                console.log(`========================================`);
+            }, 3000);
+        } catch (err) {
+            console.error("Erreur pairing code:", err);
+        }
+}
     sock.ev.on('connection.update', (update) => {
         const { connection, qr } = update;
         if (qr) {
