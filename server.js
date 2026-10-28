@@ -1,6 +1,7 @@
 const express = require('express');
 const { default: makeWASocket, useMultiFileAuthState } = require('@whiskeysockets/baileys');
 const pino = require('pino');
+const qrcode = require('qrcode-terminal'); // Utilisation explicite pour forcer l'affichage
 const fs = require('fs');
 
 const app = express();
@@ -9,13 +10,12 @@ const PORT = process.env.PORT || 10000;
 async function startWhatsAppSession() {
     const sessionPath = `./auth_info_sion`;
     
-    // Nettoyage radical de l'ancienne session à chaque démarrage
     if (fs.existsSync(sessionPath)) {
         try {
             fs.rmSync(sessionPath, { recursive: true, force: true });
-            console.log('Ancienne session supprimée avec succès.');
+            console.log('Ancienne session nettoyée.');
         } catch (err) {
-            console.error('Erreur suppression session:', err);
+            console.error('Erreur nettoyage:', err);
         }
     }
 
@@ -23,13 +23,19 @@ async function startWhatsAppSession() {
 
     const sock = makeWASocket({
         auth: state,
-        printQRTerminal: true, // Force l'affichage du QR code dans les logs Render
         logger: pino({ level: 'silent' }),
         browser: ["WaziBot Express", "Chrome", "10.15.0"]
     });
 
+    // Affichage propre et direct du QR Code via qrcode-terminal
     sock.ev.on('connection.update', (update) => {
-        const { connection } = update;
+        const { connection, qr } = update;
+        
+        if (qr) {
+            console.log('--- SCANNEZ CE QR CODE ---');
+            qrcode.generate(qr, { small: true });
+        }
+
         if (connection === 'open') {
             console.log('✅ WhatsApp connecté avec succès !');
         }
@@ -38,7 +44,6 @@ async function startWhatsAppSession() {
     sock.ev.on('creds.update', saveCreds);
 }
 
-// Lancement unique au démarrage du serveur
 startWhatsAppSession();
 
 app.get('/', (req, res) => {
