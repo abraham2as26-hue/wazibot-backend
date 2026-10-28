@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const pino = require('pino');
+const fs = require('fs');
 const OpenAI = require('openai');
 const { default: makeWASocket, useMultiFileAuthState } = require('@whiskeysockets/baileys');
 
@@ -48,10 +49,17 @@ function stopSession(clientId) {
             clients[clientId].sock = null;
         }
     }
+    // Nettoyage complet des anciens fichiers de session
+    const sessionPath = `./auth_info_${clientId}`;
+    if (fs.existsSync(sessionPath)) {
+        fs.rmSync(sessionPath, { recursive: true, force: true });
+        console.log(`Dossier de session ${sessionPath} nettoyé.`);
+    }
 }
 
 // Fonction pour démarrer Baileys et gérer la connexion
 async function startWhatsAppSession(clientId) {
+    stopSession(clientId); // Nettoie avant de recréer une session neuve
     const client = getClient(clientId);
     const { state, saveCreds } = await useMultiFileAuthState(`./auth_info_${clientId}`);
     
@@ -63,19 +71,19 @@ async function startWhatsAppSession(clientId) {
 
     const phoneNumber = process.env.PHONE_NUMBER;
     if (phoneNumber && !sock.authState.creds.registered && !client.pairingRequested) {
-        client.pairingRequested = true; // Verrou anti-boucle pour un code unique
+        client.pairingRequested = true;
         try {
             const cleanedNumber = phoneNumber.replace(/[^0-9]/g, '');
             setTimeout(async () => {
                 const code = await sock.requestPairingCode(cleanedNumber);
                 client.pairingCode = code;
                 console.log("========================================");
-                console.log(`CODE D'APPAIRAGE UNIQUE POUR ${clientId} : ${code}`);
+                console.log(`NOUVEAU CODE D'APPAIRAGE UNIQUE : ${code}`);
                 console.log("========================================");
             }, 5000);
         } catch (err) {
             console.error("Erreur pairing code:", err);
-            client.pairingRequested = false; // Réinitialise en cas d'erreur
+            client.pairingRequested = false;
         }
     }
 
@@ -138,10 +146,113 @@ async function startWhatsAppSession(clientId) {
     client.sock = sock;
 }
 
-// ================= ROUTES API =================
+// ================= ROUTES API & FRONT-END INTÉGRÉ =================
 
+// Page d'accueil : Interface web SaaS pour les clients
 app.get("/", (req, res) => {
-    res.json({ ok: true, service: "wazibot-backend", status: "running" });
+    res.send(`<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WaziBot Express - Connexion WhatsApp</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+</head>
+<body class="bg-slate-50 min-h-screen flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-xl p-8 max-w-md w-full text-center">
+        <h1 class="text-2xl font-bold text-slate-800 mb-2">WaziBot Express</h1>
+        <p class="text-slate-500 text-sm mb-6">Connectez votre WhatsApp pour démarrer votre période d'essai de 7 jours.</p>
+        
+        <div class="mb-4 text-left">
+            <label class="block text-xs font-semibold text-slate-600 uppercase mb-1">Identifiant de votre structure</label>
+            <input type="text" id="clientId" value="sion" class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none text-slate-800 font-medium">
+        </div>
+
+        <button id="connectBtn" onclick="startConnection()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 rounded-lg transition duration-200 shadow-md cursor-pointer">
+            Générer mon QR Code
+        </button>
+
+        <div id="qrContainer" class="mt-6 hidden flex flex-col items-center">
+            <div id="qrcode" class="p-4 bg-white border border-slate-200 rounded-xl shadow-inner inline-block"></div>
+            <p class="text-xs text-slate-500 mt-3 animate-pulse">Scannez ce QR code avec WhatsApp (Appareils liés)</p>
+        </div>
+
+        <div id="statusMessage" class="mt-6 text-sm font-medium text-slate-600">
+            En attente de démarrage...
+        </div>
+    </div>
+
+    <script>
+        let checkInterval = null;
+
+        async function startConnection() {
+            const clientId = document.getElementById('clientId').value.trim();
+            const statusDiv = document.getElementById('statusMessage');
+            const qrContainer = document.getElementById('qrContainer');
+            
+            if (!clientId) {
+                alert("Veuillez entrer un identifiant valide.");
+                return;
+            }
+
+            statusDiv.textContent = "Initialisation de la session...";
+            qrContainer.classList.add('hidden');
+
+            try {
+                const res = await fetch(\`/api/clients/\${clientId}/connect\`);
+                const data = await res.json();
+
+                if (data.success) {
+                    statusDiv.textContent = "Recherche du QR code en cours...";
+                    if (checkInterval) clearInterval(checkInterval);
+                    checkInterval = setInterval(() => pollClientStatus(clientId), 3000);
+                } else {
+                    statusDiv.textContent = "Erreur au démarrage.";
+                }
+            } catch (err) {
+                console.error(err);
+                statusDiv.textContent = "Impossible de joindre le serveur.";
+            }
+        }
+
+        async function pollClientStatus(clientId) {
+            const statusDiv = document.getElementById('statusMessage');
+            const qrContainer = document.getElementById('qrContainer');
+
+            try {
+                const statusRes = await fetch(\`/api/clients/\${clientId}/status\`);
+                const statusData = await statusRes.json();
+
+                if (statusData.connected) {
+                    clearInterval(checkInterval);
+                    qrContainer.classList.add('hidden');
+                    statusDiv.innerHTML = "<span class='text-green-600 font-bold'>✓ WhatsApp connecté avec succès ! Bot actif.</span>";
+                    return;
+                }
+
+                const qrRes = await fetch(\`/api/clients/\${clientId}/qr\`);
+                const qrData = await qrRes.json();
+
+                if (qrData.success && qrData.qr) {
+                    qrContainer.classList.remove('hidden');
+                    statusDiv.textContent = "Scannez le QR code ci-dessous :";
+                    
+                    const qrElement = document.getElementById('qrcode');
+                    qrElement.innerHTML = "";
+                    new QRCode(qrElement, {
+                        text: qrData.qr,
+                        width: 220,
+                        height: 220
+                    });
+                }
+            } catch (err) {
+                console.error("Erreur lors du polling :", err);
+            }
+        }
+    </script>
+</body>
+</html>`);
 });
 
 app.get("/health", (req, res) => res.json({ ok: true, status: "running" }));
@@ -176,7 +287,7 @@ app.get('/api/clients/:clientId/connect', async (req, res) => {
     const { clientId } = req.params;
     try {
         await startWhatsAppSession(clientId);
-        res.json({ success: true, message: "Génération du code d'appairage démarrée." });
+        res.json({ success: true, message: "Session réinitialisée et génération du code démarrée." });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
