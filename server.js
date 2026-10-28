@@ -25,6 +25,7 @@ function getClient(clientId) {
             connected: false,
             qr: null,
             pairingCode: null,
+            pairingRequested: false,
             systemPrompt: "Tu es l'assistant virtuel intelligent de WaziBot Express."
         };
     }
@@ -40,6 +41,8 @@ function stopSession(clientId) {
     if (clients[clientId]) {
         clients[clientId].connected = false;
         clients[clientId].qr = null;
+        clients[clientId].pairingRequested = false;
+        clients[clientId].pairingCode = null;
         if (clients[clientId].sock) {
             clients[clientId].sock.end();
             clients[clientId].sock = null;
@@ -47,7 +50,7 @@ function stopSession(clientId) {
     }
 }
 
-// Fonction pour démarrer Baileys, capturer le QR code et écouter les messages
+// Fonction pour démarrer Baileys et gérer la connexion
 async function startWhatsAppSession(clientId) {
     const client = getClient(clientId);
     const { state, saveCreds } = await useMultiFileAuthState(`./auth_info_${clientId}`);
@@ -57,21 +60,25 @@ async function startWhatsAppSession(clientId) {
         printQRInTerminal: true,
         logger: pino({ level: 'silent' })
     });
+
     const phoneNumber = process.env.PHONE_NUMBER;
-    if (phoneNumber && !sock.authState.creds.registered && !client.pairingCode) {
+    if (phoneNumber && !sock.authState.creds.registered && !client.pairingRequested) {
+        client.pairingRequested = true; // Verrou anti-boucle pour un code unique
         try {
             const cleanedNumber = phoneNumber.replace(/[^0-9]/g, '');
             setTimeout(async () => {
                 const code = await sock.requestPairingCode(cleanedNumber);
                 client.pairingCode = code;
-                console.log(`========================================`);
-                console.log(`CODE D'APPAIRAGE POUR ${clientId} : ${code}`);
-                console.log(`========================================`);
-            }, 3000);
+                console.log("========================================");
+                console.log(`CODE D'APPAIRAGE UNIQUE POUR ${clientId} : ${code}`);
+                console.log("========================================");
+            }, 5000);
         } catch (err) {
             console.error("Erreur pairing code:", err);
+            client.pairingRequested = false; // Réinitialise en cas d'erreur
         }
-}
+    }
+
     sock.ev.on('connection.update', (update) => {
         const { connection, qr } = update;
         if (qr) {
@@ -85,6 +92,7 @@ async function startWhatsAppSession(clientId) {
         if (connection === 'close') {
             client.connected = false;
             client.qr = null;
+            client.pairingRequested = false;
         }
     });
 
@@ -159,7 +167,7 @@ app.get("/api/clients/:clientId/pairing-code", (req, res) => {
     const client = getClient(clientId);
     res.json({
         ok: true,
-        pairingCode: client.pairingCode || "1234-5678",
+        pairingCode: client.pairingCode || "En attente...",
         connected: client.connected
     });
 });
@@ -168,7 +176,7 @@ app.get('/api/clients/:clientId/connect', async (req, res) => {
     const { clientId } = req.params;
     try {
         await startWhatsAppSession(clientId);
-        res.json({ success: true, message: "Génération du QR code démarrée." });
+        res.json({ success: true, message: "Génération du code d'appairage démarrée." });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
