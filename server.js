@@ -1,52 +1,48 @@
 const express = require('express');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState } = require('@whiskeysockets/baileys');
 const pino = require('pino');
-const cors = require('cors');
 const fs = require('fs');
 
 const app = express();
-app.use(express.json());
-app.use(cors());
-
 const PORT = process.env.PORT || 10000;
 
 async function startWhatsAppSession() {
     const sessionPath = `./auth_info_sion`;
+    
+    // Nettoyage radical de l'ancienne session à chaque démarrage
     if (fs.existsSync(sessionPath)) {
-        fs.rmSync(sessionPath, { recursive: true, force: true });
+        try {
+            fs.rmSync(sessionPath, { recursive: true, force: true });
+            console.log('Ancienne session supprimée avec succès.');
+        } catch (err) {
+            console.error('Erreur suppression session:', err);
+        }
     }
 
     const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
 
     const sock = makeWASocket({
         auth: state,
-        printQRTerminal: true, // Affiche le QR code dans les logs Render
+        printQRTerminal: true, // Force l'affichage du QR code dans les logs Render
         logger: pino({ level: 'silent' }),
         browser: ["WaziBot Express", "Chrome", "10.15.0"]
     });
 
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect } = update;
+    sock.ev.on('connection.update', (update) => {
+        const { connection } = update;
         if (connection === 'open') {
             console.log('✅ WhatsApp connecté avec succès !');
-        }
-        if (connection === 'close') {
-            const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log('Connexion fermée, reconnexion...', shouldReconnect);
-            if (shouldReconnect) {
-                startWhatsAppSession();
-            }
         }
     });
 
     sock.ev.on('creds.update', saveCreds);
 }
 
-// Démarrage automatique au lancement du serveur
+// Lancement unique au démarrage du serveur
 startWhatsAppSession();
 
 app.get('/', (req, res) => {
-    res.send('<h2>WaziBot Express est en ligne. Regardez les logs Render pour scanner le QR Code.</h2>');
+    res.send('<h2>WaziBot Express - Regardez les logs Render pour scanner le QR Code.</h2>');
 });
 
 app.listen(PORT, () => {
