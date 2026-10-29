@@ -6,7 +6,7 @@ const fs = require('fs');
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-const PHONE_NUMBER = "+2250716017887";
+const PHONE_NUMBER = "+225 0716017887";
 
 async function startWhatsAppSession() {
     const sessionPath = `./auth_info_sion`;
