@@ -1,11 +1,12 @@
 const express = require('express');
-const { default: makeWASocket, useMultiFileAuthState } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const pino = require('pino');
-const QRCode = require('qrcode'); // Utilise le module qrcode déjà installé
 const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
+
+const PHONE_NUMBER = "2250716017887";
 
 async function startWhatsAppSession() {
     const sessionPath = `./auth_info_sion`;
@@ -24,20 +25,36 @@ async function startWhatsAppSession() {
     const sock = makeWASocket({
         auth: state,
         logger: pino({ level: 'silent' }),
-        browser: ["WaziBot Express", "Chrome", "10.15.0"]
+        browser: ["Ubuntu", "Chrome", "20.0.04"],
+        printQRTerminal: false
     });
 
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, qr } = update;
-        
-        if (qr) {
-            console.log('--- SCANNEZ CE QR CODE ---');
-            // Affiche le QR code en texte brut directement dans les logs Render
-            console.log(await QRCode.toString(qr, { type: 'terminal', small: true }));
-        }
+    if (!sock.authState.creds.registered) {
+        setTimeout(async () => {
+            try {
+                const code = await sock.requestPairingCode(PHONE_NUMBER);
+                console.log("\n==========================================");
+                console.log(`🔑 VOTRE CODE D'APPAIRAGE : ${code}`);
+                console.log("==========================================\n");
+            } catch (err) {
+                console.error("Erreur lors de la génération du code d'appairage :", err);
+            }
+        }, 3000);
+    }
 
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect } = update;
+        
         if (connection === 'open') {
             console.log('✅ WhatsApp connecté avec succès !');
+        }
+
+        if (connection === 'close') {
+            const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
+            console.log('Connexion fermée, reconnexion...', shouldReconnect);
+            if (shouldReconnect) {
+                startWhatsAppSession();
+            }
         }
     });
 
@@ -47,7 +64,7 @@ async function startWhatsAppSession() {
 startWhatsAppSession();
 
 app.get('/', (req, res) => {
-    res.send('<h2>WaziBot Express - Regardez les logs Render pour scanner le QR Code.</h2>');
+    res.send('<h2>WaziBot Express - Regardez les logs Render pour le code d\'appairage.</h2>');
 });
 
 app.listen(PORT, () => {
